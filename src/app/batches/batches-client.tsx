@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative } from "@/lib/utils";
+import { estimateCost, type Usage } from "@/lib/pricing";
 import { BatchDetail } from "@/app/batches/[id]/batch-detail";
 import {
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   Circle,
   ChevronRight as ArrowRight,
   Tags,
+  RotateCcw,
 } from "lucide-react";
 
 type Batch = {
@@ -27,14 +29,17 @@ type Batch = {
   endpoint: string;
   created_at: number;
   completion_window?: string;
+  model?: string | null;
   request_counts?: { total?: number; completed?: number; failed?: number };
   input_file_id?: string;
   output_file_id?: string | null;
   error_file_id?: string | null;
   metadata?: Record<string, string> | null;
+  usage?: Usage | null;
 };
 
 const RUNNING = new Set(["validating", "in_progress", "finalizing"]);
+const RESTARTABLE = new Set(["completed", "failed", "expired", "cancelled"]);
 const PAGE_SIZE = 20;
 const CACHE_KEY = "batchdash:batches";
 
@@ -61,12 +66,13 @@ export function BatchesClient() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [cancelling, setCancelling] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<
     "all" | "selected" | null
   >(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<React.ReactNode | null>(null);
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: React.ReactNode) => {
     setToast(msg);
     setTimeout(() => setToast(null), 4000);
   };
@@ -74,6 +80,26 @@ export function BatchesClient() {
   const saveCache = (batches: Batch[], cursor: string | null) => {
     try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ batches, cursor })); } catch {}
   };
+
+  const pollNewBatches = useCallback(async () => {
+    if (allBatches.length === 0) return;
+    try {
+      const res = await fetch("/api/batches?limit=100", { cache: "no-store" });
+      const body = await res.json();
+      if (!res.ok) return;
+      const existingIds = new Set(allBatches.map((b) => b.id));
+      const fresh = (body.batches as Batch[]).filter((b) => !existingIds.has(b.id));
+      if (fresh.length === 0) return;
+      const next = [...fresh, ...allBatches];
+      setAllBatches(next);
+      saveCache(next, continueCursor);
+    } catch {}
+  }, [allBatches, continueCursor]);
+
+  useEffect(() => {
+    const id = setInterval(pollNewBatches, 30_000);
+    return () => clearInterval(id);
+  }, [pollNewBatches]);
 
   const load = useCallback(async (force = false) => {
     if (!force) {
@@ -300,6 +326,38 @@ export function BatchesClient() {
     else if (confirmTarget === "selected") cancelIds(cancellableSelected);
   };
 
+  const restartBatch = async (id: string) => {
+    setRestarting(true);
+    try {
+      const res = await fetch("/api/batches/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [id] }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      if (body.restarted.length > 0) {
+        const newId = body.restarted[0].newId;
+        showToast(
+          <span>
+            New batch created.{" "}
+            <button onClick={() => setModalId(newId)} className="underline text-[var(--brand)]">
+              {newId}
+            </button>
+          </span>
+        );
+        setModalId(newId);
+        await load(true);
+      } else {
+        showToast(`Restart failed: ${body.failed[0]?.error ?? "unknown error"}`);
+      }
+    } catch (e) {
+      showToast(`Error: ${e instanceof Error ? e.message : "restart failed"}`);
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   const cancelCount =
     confirmTarget === "all" ? allRunning.length : cancellableSelected.length;
 
@@ -400,6 +458,7 @@ export function BatchesClient() {
               <th className="text-left font-normal px-4 py-2.5">Status</th>
               <th className="text-left font-normal px-4 py-2.5">Endpoint</th>
               <th className="text-right font-normal px-4 py-2.5">Progress</th>
+              <th className="text-right font-normal px-4 py-2.5">Cost</th>
               <th className="text-right font-normal px-4 py-2.5">Created</th>
               <th className="text-left font-normal px-4 py-2.5">Meta</th>
               <th className="w-16 px-4 py-2.5" />
@@ -408,14 +467,14 @@ export function BatchesClient() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center">
+                <td colSpan={9} className="px-4 py-12 text-center">
                   <Loader2 className="size-5 animate-spin inline text-[var(--fg-muted)]" />
                 </td>
               </tr>
             )}
             {!loading && pageRows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center text-[var(--fg-muted)]">
+                <td colSpan={9} className="px-4 py-12 text-center text-[var(--fg-muted)]">
                   {query ? "No batches match." : "No batches yet."}
                 </td>
               </tr>
@@ -490,6 +549,16 @@ export function BatchesClient() {
                         <span className="text-[var(--fg-muted)] text-xs">—</span>
                       )}
                     </td>
+                    <td className="px-4 py-3 text-right text-xs">
+                      {(() => {
+                        const cost = b.usage && b.model ? estimateCost(b.usage, b.model) : null;
+                        return cost != null ? (
+                          <span className="mono text-[var(--fg-secondary)]">${cost.total.toFixed(4)}</span>
+                        ) : (
+                          <span className="text-[var(--fg-muted)]">—</span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-4 py-3 text-right text-xs text-[var(--fg-muted)]">
                       {formatRelative(b.created_at)}
                     </td>
@@ -536,13 +605,23 @@ export function BatchesClient() {
                             <Ban className="size-3.5" />
                           </button>
                         )}
-                        <ArrowRight className="size-3.5 text-[var(--fg-muted)]" />
+                        {RESTARTABLE.has(b.status) && (
+                          <button
+                            title="Restart this batch"
+                            disabled={restarting}
+                            onClick={(e) => { e.stopPropagation(); restartBatch(b.id); }}
+                            className="text-[var(--fg-muted)] hover:text-[var(--brand)] transition-colors disabled:opacity-40"
+                          >
+                            <RotateCcw className="size-3.5" />
+                          </button>
+                        )}
+                        {/* <ArrowRight className="size-3.5 text-[var(--fg-muted)]" /> */}
                       </div>
                     </td>
                   </tr>
                   {isExpanded && meta.length > 0 && (
                     <tr className="border-t border-[var(--border)] bg-[var(--bg-elevated)]/40">
-                      <td colSpan={8} className="px-6 py-3">
+                      <td colSpan={9} className="px-6 py-3">
                         <div className="flex flex-wrap gap-x-6 gap-y-2">
                           {meta.map(([k, v]) => (
                             <div key={k} className="flex items-baseline gap-2 min-w-0">
@@ -622,7 +701,12 @@ export function BatchesClient() {
             className="relative w-full max-w-5xl mx-4 rounded-xl border border-[var(--border-strong)] bg-[var(--bg)] shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <BatchDetail id={modalId} onClose={() => setModalId(null)} initialBatch={allBatches.find((b) => b.id === modalId)} />
+            <BatchDetail
+              id={modalId}
+              onClose={() => setModalId(null)}
+              initialBatch={allBatches.find((b) => b.id === modalId)}
+              onRestart={(newId) => { setModalId(newId); load(true); }}
+            />
           </div>
         </div>
       )}

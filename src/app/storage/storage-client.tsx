@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatBytes, formatRelative } from "@/lib/utils";
-import { RefreshCw, AlertCircle, Loader2, FileText, Download } from "lucide-react";
+import { RefreshCw, AlertCircle, Loader2, FileText, Download, ChevronDown, ChevronLeft, ChevronRight, Search, X } from "lucide-react";
 
 type FileObj = {
   id: string;
@@ -35,19 +35,28 @@ function triggerDownload(id: string, filename: string) {
   a.click();
 }
 
+const MAX_FILES = 500;
+const PAGE_SIZE = 100;
+
 export function StorageClient() {
   const [files, setFiles] = useState<FileObj[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [continueCursor, setContinueCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [downloading, setDownloading] = useState(false);
+  const [page, setPage] = useState(0);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(async (force = false) => {
     if (!force) {
       try {
         const raw = sessionStorage.getItem(FILES_CACHE_KEY);
         if (raw) {
-          setFiles(JSON.parse(raw));
+          const { files: cached, cursor } = JSON.parse(raw) as { files: FileObj[]; cursor: string | null };
+          setFiles(cached);
+          setContinueCursor(cursor);
           return;
         }
       } catch {}
@@ -58,35 +67,113 @@ export function StorageClient() {
     }
 
     setLoading(true);
+    setLoadingMore(false);
+    setContinueCursor(null);
     setError(null);
+    setFiles(null);
+    setSelected(new Set());
+    setPage(0);
+
     try {
-      const res = await fetch("/api/files", { cache: "no-store" });
+      // fetch first 100, show UI
+      const res = await fetch("/api/files?limit=100", { cache: "no-store" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setFiles(body.files);
-      setSelected(new Set());
-      try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify(body.files)); } catch {}
+      setLoading(false);
+
+      if (!body.has_more) {
+        try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: body.files, cursor: null })); } catch {}
+        return;
+      }
+
+      // background: fetch up to MAX_FILES total
+      setLoadingMore(true);
+      let cursor: string | null = body.next_cursor;
+      let collected: FileObj[] = [...body.files];
+
+      while (cursor && collected.length < MAX_FILES) {
+        const r = await fetch(`/api/files?limit=100&after=${cursor}`, { cache: "no-store" });
+        const b = await r.json();
+        if (!r.ok) break;
+        collected = [...collected, ...b.files];
+        setFiles(collected);
+        cursor = b.has_more && collected.length < MAX_FILES ? b.next_cursor : null;
+        if (!b.has_more) break;
+      }
+
+      const finalCursor = collected.length >= MAX_FILES ? cursor : null;
+      setContinueCursor(finalCursor);
+      try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: collected, cursor: finalCursor })); } catch {}
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
-    } finally {
       setLoading(false);
+    } finally {
+      setLoadingMore(false);
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  const loadMore = useCallback(async () => {
+    if (!continueCursor || loadingMore) return;
+    setLoadingMore(true);
+    setContinueCursor(null);
+    let cursor: string | null = continueCursor;
+    let existing: FileObj[] = [];
+    try {
+      const raw = sessionStorage.getItem(FILES_CACHE_KEY);
+      if (raw) existing = (JSON.parse(raw) as { files: FileObj[] }).files ?? [];
+    } catch {}
+
+    try {
+      let added: FileObj[] = [];
+      while (cursor && added.length < MAX_FILES) {
+        const r = await fetch(`/api/files?limit=100&after=${cursor}`, { cache: "no-store" });
+        const b = await r.json();
+        if (!r.ok) break;
+        added = [...added, ...b.files];
+        setFiles([...existing, ...added]);
+        cursor = b.has_more ? b.next_cursor : null;
+        if (!b.has_more) break;
+      }
+      const finalCursor = cursor ?? null;
+      setContinueCursor(finalCursor);
+      const all = [...existing, ...added];
+      try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: all, cursor: finalCursor })); } catch {}
+    } catch {
+      // silently stop
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [continueCursor, loadingMore]);
+
+  useEffect(() => { load(); }, [load]);
 
   const totalBytes = files?.reduce((a, f) => a + (f.bytes || 0), 0) ?? 0;
 
-  const allSelected = files != null && files.length > 0 && selected.size === files.length;
-  const someSelected = selected.size > 0 && !allSelected;
+  const filtered = files
+    ? query.trim()
+      ? files.filter((f) => {
+          const q = query.trim().toLowerCase();
+          return f.filename.toLowerCase().includes(q) || f.id.toLowerCase().includes(q) || f.purpose.toLowerCase().includes(q);
+        })
+      : files
+    : null;
+
+  const totalPages = Math.max(1, Math.ceil((filtered?.length ?? 0) / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageRows = filtered?.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE) ?? [];
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setPage(0); }, [query]);
+
+  const allSelected = pageRows.length > 0 && pageRows.every((f) => selected.has(f.id));
+  const someSelected = selected.size > 0 && !pageRows.every((f) => selected.has(f.id)) && pageRows.some((f) => selected.has(f.id));
 
   function toggleAll() {
     if (allSelected) {
-      setSelected(new Set());
+      setSelected((s) => { const n = new Set(s); pageRows.forEach((f) => n.delete(f.id)); return n; });
     } else {
-      setSelected(new Set(files!.map((f) => f.id)));
+      setSelected((s) => { const n = new Set(s); pageRows.forEach((f) => n.add(f.id)); return n; });
     }
   }
 
@@ -113,10 +200,11 @@ export function StorageClient() {
   return (
     <div className="px-8 py-6">
       <div className="flex items-center justify-between mb-4">
-        <span className="label-mono">
+        <span className="label-mono inline-flex items-center gap-2">
           {files == null
             ? "loading"
-            : `${files.length} files · ${formatBytes(totalBytes)}`}
+            : `${files.length}${loadingMore ? "+" : ""} files · ${formatBytes(totalBytes)}`}
+          {loadingMore && <Loader2 className="size-3 animate-spin text-[var(--fg-muted)]" />}
         </span>
         <div className="flex items-center gap-2">
           {selected.size > 0 && (
@@ -139,6 +227,30 @@ export function StorageClient() {
             Refresh
           </Button>
         </div>
+      </div>
+
+      <div className="relative flex items-center mb-4">
+        <Search className="absolute left-3 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
+        <input
+          type="text"
+          placeholder="Search by filename, ID, purpose…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="h-9 w-full max-w-lg rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
+        />
+        {query && (
+          <>
+            <button
+              onClick={() => setQuery("")}
+              className="absolute left-[calc(min(100%,32rem)-24px)] text-[var(--fg-muted)] hover:text-[var(--fg)]"
+            >
+              <X className="size-3.5" />
+            </button>
+            <span className="ml-3 text-xs text-[var(--fg-muted)]">
+              {filtered?.length ?? 0} result{(filtered?.length ?? 0) !== 1 ? "s" : ""}
+            </span>
+          </>
+        )}
       </div>
 
       {error && (
@@ -190,7 +302,7 @@ export function StorageClient() {
                 </td>
               </tr>
             )}
-            {files?.map((f) => (
+            {pageRows.map((f) => (
               <tr
                 key={f.id}
                 className="border-t border-[var(--border)] hover:bg-[var(--bg-elevated)]/60"
@@ -239,6 +351,32 @@ export function StorageClient() {
           </tbody>
         </table>
       </div>
+
+      <div className="flex items-center justify-between mt-4">
+        <span className="label-mono text-[var(--fg-muted)] inline-flex items-center gap-2">
+          {query
+            ? `${filtered?.length ?? 0} results · page ${safePage + 1} of ${totalPages}`
+            : `${files?.length ?? 0}${loadingMore ? "+" : ""} files · page ${safePage + 1} of ${totalPages}`}
+          {loadingMore && <Loader2 className="size-3 animate-spin" />}
+        </span>
+        <div className="flex items-center gap-2">
+          {continueCursor && !loadingMore && (
+            <Button variant="outline" size="sm" onClick={loadMore}>
+              <ChevronDown className="size-3.5" />
+              Load 500 more
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0 || loading}>
+            <ChevronLeft className="size-4" />
+            Prev
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))} disabled={safePage >= totalPages - 1 || loading}>
+            Next
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+      </div>
+
     </div>
   );
 }

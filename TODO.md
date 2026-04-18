@@ -1,0 +1,4 @@
+- [ ] Since the batches are saved in webcache, two issues arise, any past 5000 will not be and when reloading the page new batches that may have started will not show
+- [x] /storage is so slow
+- [ ] Add sorting in batches
+- [x] Add usage and cost in /batches because its already given in the data

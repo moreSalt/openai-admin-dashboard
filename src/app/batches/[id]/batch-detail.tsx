@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,85 +18,12 @@ import {
   Clock,
   X,
   ExternalLink,
+  RotateCcw,
 } from "lucide-react";
+import { estimateCost, type Usage } from "@/lib/pricing";
+import { ResponseModal } from "@/components/response-modal";
 
-type Usage = {
-  input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
-  output_tokens_details?: { reasoning_tokens?: number };
-};
-
-// Batch API pricing per 1M tokens: [input, cached_input, output]
-const BATCH_PRICING: Record<string, [number, number | null, number]> = {
-  "gpt-5.4":                  [1.25,   0.13,   7.50],
-  "gpt-5.4-mini":             [0.375,  0.0375, 2.25],
-  "gpt-5.4-nano":             [0.10,   0.01,   0.625],
-  "gpt-5.4-pro":              [15.00,  null,   90.00],
-  "gpt-5.2":                  [0.875,  0.0875, 7.00],
-  "gpt-5.2-pro":              [10.50,  null,   84.00],
-  "gpt-5.1":                  [0.625,  0.0625, 5.00],
-  "gpt-5":                    [0.625,  0.0625, 5.00],
-  "gpt-5-mini":               [0.125,  0.0125, 1.00],
-  "gpt-5-nano":               [0.025,  0.0025, 0.20],
-  "gpt-5-pro":                [7.50,   null,   60.00],
-  "gpt-4.1":                  [1.00,   null,   4.00],
-  "gpt-4.1-mini":             [0.20,   null,   0.80],
-  "gpt-4.1-nano":             [0.05,   null,   0.20],
-  "gpt-4o":                   [1.25,   null,   5.00],
-  "gpt-4o-mini":              [0.075,  null,   0.30],
-  "o4-mini":                  [0.55,   null,   2.20],
-  "o3":                       [1.00,   null,   4.00],
-  "o3-mini":                  [0.55,   null,   2.20],
-  "o3-pro":                   [10.00,  null,   40.00],
-  "o1":                       [7.50,   null,   30.00],
-  "o1-mini":                  [0.55,   null,   2.20],
-  "o1-pro":                   [75.00,  null,   300.00],
-  "gpt-4o-2024-05-13":        [2.50,   null,   7.50],
-  "gpt-4-turbo-2024-04-09":   [5.00,   null,   15.00],
-  "gpt-4-0125-preview":       [5.00,   null,   15.00],
-  "gpt-4-1106-preview":       [5.00,   null,   15.00],
-  "gpt-4-1106-vision-preview":[5.00,   null,   15.00],
-  "gpt-4-0613":               [15.00,  null,   30.00],
-  "gpt-4-0314":               [15.00,  null,   30.00],
-  "gpt-4-32k":                [30.00,  null,   60.00],
-  "gpt-3.5-turbo-0125":       [0.25,   null,   0.75],
-  "gpt-3.5-turbo-1106":       [1.00,   null,   2.00],
-  "gpt-3.5-turbo-0613":       [1.50,   null,   2.00],
-  "gpt-3.5-0301":             [1.50,   null,   2.00],
-  "gpt-3.5-turbo-16k-0613":   [1.50,   null,   2.00],
-  "davinci-002":              [1.00,   null,   1.00],
-  "babbage-002":              [0.20,   null,   0.20],
-};
-
-function getPricing(model: string) {
-  // exact match first, then longest prefix match
-  if (BATCH_PRICING[model]) return BATCH_PRICING[model];
-  const keys = Object.keys(BATCH_PRICING).sort((a, b) => b.length - a.length);
-  const match = keys.find(k => model.startsWith(k));
-  return match ? BATCH_PRICING[match] : null;
-}
-
-type CostBreakdown = {
-  inputCost: number;
-  cachedCost: number;
-  outputCost: number;
-  total: number;
-  hasCachedRate: boolean;
-};
-
-function estimateCost(usage: Usage, model: string): CostBreakdown | null {
-  const pricing = getPricing(model);
-  if (!pricing) return null;
-  const [inputRate, cachedRate, outputRate] = pricing;
-  const cached = usage.input_tokens_details?.cached_tokens ?? 0;
-  const nonCached = usage.input_tokens - cached;
-  const inputCost = (nonCached / 1_000_000) * inputRate;
-  const cachedCost = (cached / 1_000_000) * (cachedRate ?? inputRate);
-  const outputCost = (usage.output_tokens / 1_000_000) * outputRate;
-  return { inputCost, cachedCost, outputCost, total: inputCost + cachedCost + outputCost, hasCachedRate: cachedRate != null };
-}
+const RESTARTABLE = new Set(["completed", "failed", "expired", "cancelled"]);
 
 type Batch = {
   id: string;
@@ -126,6 +54,29 @@ type Batch = {
 };
 
 const RUNNING = new Set(["validating", "in_progress", "finalizing"]);
+
+type ResponseRow = {
+  custom_id: string | null;
+  status_code: number | null;
+  id: string | null;
+  model: string | null;
+  duration_s: number | null;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cached_tokens: number;
+    reasoning_tokens: number;
+  } | null;
+  format_type: string | null;
+  format_name: string | null;
+  reasoning_effort: string | null;
+  output_text: string | null;
+  raw_body: Record<string, unknown> | null;
+  error: unknown;
+};
+
+const RESP_LIMIT = 50;
 
 function statusTone(s: string): "success" | "warn" | "danger" | "info" | "neutral" {
   if (s === "completed") return "success";
@@ -255,17 +206,30 @@ export function BatchDetail({
   id,
   onClose,
   initialBatch,
+  onRestart,
 }: {
   id: string;
   onClose?: () => void;
   initialBatch?: InitialBatch;
+  onRestart?: (newId: string) => void;
 }) {
+  const router = useRouter();
   const [batch, setBatch] = useState<Batch | null>(initialBatch ? toFullBatch(initialBatch) : null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!initialBatch);
   const [cancelling, setCancelling] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [responsesOpen, setResponsesOpen] = useState(false);
+  const [responsesLoaded, setResponsesLoaded] = useState(false);
+  const [responses, setResponses] = useState<ResponseRow[]>([]);
+  const [responsesLoading, setResponsesLoading] = useState(false);
+  const [responsesError, setResponsesError] = useState<string | null>(null);
+  const [responsesOffset, setResponsesOffset] = useState(0);
+  const [responsesTotal, setResponsesTotal] = useState(0);
+  const [selectedResponse, setSelectedResponse] = useState<ResponseRow | null>(null);
+  const [tab, setTab] = useState<"details" | "responses">("details");
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -318,6 +282,67 @@ export function BatchDetail({
       setConfirmOpen(false);
     }
   };
+
+  const restartBatch = async () => {
+    if (!batch) return;
+    setRestarting(true);
+    try {
+      const res = await fetch("/api/batches/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [batch.id] }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      if (body.restarted.length > 0) {
+        const newId = body.restarted[0].newId;
+        if (onRestart) {
+          onRestart(newId);
+        } else {
+          router.push(`/batches/${newId}`);
+        }
+      } else {
+        showToast(`Restart failed: ${body.failed[0]?.error ?? "unknown error"}`);
+      }
+    } catch (e) {
+      showToast(`Error: ${e instanceof Error ? e.message : "restart failed"}`);
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  const loadResponses = useCallback(async (offset: number) => {
+    setResponsesLoading(true);
+    setResponsesError(null);
+    try {
+      const res = await fetch(`/api/batches/${id}/responses?limit=${RESP_LIMIT}&offset=${offset}`, { cache: "no-store" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setResponses(body.responses);
+      setResponsesTotal(body.total);
+      setResponsesOffset(offset);
+      setResponsesLoaded(true);
+    } catch (e) {
+      setResponsesError(e instanceof Error ? e.message : "Failed to load responses");
+    } finally {
+      setResponsesLoading(false);
+    }
+  }, [id]);
+
+  const handleToggleResponses = () => {
+    const next = !responsesOpen;
+    setResponsesOpen(next);
+    if (next && !responsesLoaded && !responsesLoading) {
+      loadResponses(0);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "responses" && !responsesLoaded && !responsesLoading) {
+      loadResponses(0);
+    }
+  }, [tab, responsesLoaded, responsesLoading, loadResponses]);
+
 
   if (loading) {
     return (
@@ -393,6 +418,12 @@ export function BatchDetail({
             <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
+          {RESTARTABLE.has(batch.status) && (
+            <Button variant="outline" size="sm" onClick={restartBatch} disabled={restarting}>
+              {restarting ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+              {restarting ? "Restarting…" : "Restart"}
+            </Button>
+          )}
           {isRunning && (
             <Button variant="danger" size="sm" onClick={() => setConfirmOpen(true)} disabled={cancelling}>
               <Ban className="size-3.5" />
@@ -416,7 +447,7 @@ export function BatchDetail({
           <Badge tone={statusTone(batch.status)}>{batch.status}</Badge>
           <span className="label-mono text-[var(--fg-muted)]">{batch.completion_window}</span>
         </div>
-        <h1 className="mono text-base text-[var(--fg-secondary)]">{batch.id}</h1>
+        <h1 className="mono text-base text-[var(--fg-secondary)] truncate">{batch.id}</h1>
         <div className="flex items-center gap-3 mt-0.5">
           <p className="mono text-sm text-[var(--fg-muted)]">{batch.endpoint}</p>
           {batch.model && (
@@ -428,6 +459,27 @@ export function BatchDetail({
         </div>
       </div>
 
+      {/* tabs */}
+      <div className="flex items-center border-b border-[var(--border)] mb-6">
+        {(["details", "responses"] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`px-4 py-2 text-sm capitalize border-b-2 -mb-px transition-colors ${
+              tab === t
+                ? "border-[var(--brand)] text-[var(--fg)]"
+                : "border-transparent text-[var(--fg-muted)] hover:text-[var(--fg)]"
+            }`}
+          >
+            {t}
+            {t === "responses" && responsesLoaded && (
+              <span className="ml-1.5 label-mono text-[var(--fg-muted)]">{responsesTotal.toLocaleString()}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === "details" && (
       <div className="grid grid-cols-3 gap-5">
         {/* left col */}
         <div className="col-span-2 flex flex-col gap-5">
@@ -602,13 +654,159 @@ export function BatchDetail({
           </div>
           <div className="rounded-lg border border-[var(--border)] p-5 flex flex-col gap-4">
             <h2 className="text-sm font-medium mb-1">Details</h2>
-            <Field label="ID"><span className="mono">{batch.id}</span></Field>
+            <Field label="ID"><span className="mono break-all">{batch.id}</span></Field>
             <Field label="Endpoint"><span className="mono">{batch.endpoint}</span></Field>
             <Field label="Window">{batch.completion_window}</Field>
             {batch.expires_at && <Field label="Expires">{formatDate(batch.expires_at)}</Field>}
           </div>
         </div>
       </div>
+      )} {/* end details tab */}
+
+      {tab === "responses" && (
+        <div className="rounded-lg border border-[var(--border)]">
+          {!batch.output_file_id ? (
+            <div className="p-5 text-sm text-[var(--fg-muted)]">No output file — batch not yet completed.</div>
+          ) : responsesLoading ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="size-5 animate-spin text-[var(--fg-muted)]" />
+            </div>
+          ) : responsesError ? (
+            <div className="p-5 text-sm text-[var(--danger)] flex items-center gap-2">
+              <AlertCircle className="size-4 shrink-0" />
+              {responsesError}
+            </div>
+          ) : responses.length === 0 ? (
+            <div className="p-5 text-sm text-[var(--fg-muted)]">No responses found.</div>
+          ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[var(--border)]">
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Custom ID</th>
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Status</th>
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Duration</th>
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Model</th>
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Format</th>
+                          <th className="label-mono font-normal text-left px-4 py-2.5 text-[var(--fg-muted)]">Effort</th>
+                          <th className="label-mono font-normal text-right px-4 py-2.5 text-[var(--fg-muted)]">Tokens</th>
+                          <th className="label-mono font-normal text-right px-4 py-2.5 text-[var(--fg-muted)]">Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {responses.map((r, i) => {
+                          const model = r.model ?? batch.model ?? "";
+                          const cost = r.usage && model
+                            ? estimateCost(
+                                {
+                                  input_tokens: r.usage.input_tokens,
+                                  output_tokens: r.usage.output_tokens,
+                                  total_tokens: r.usage.total_tokens,
+                                  input_tokens_details: { cached_tokens: r.usage.cached_tokens },
+                                  output_tokens_details: { reasoning_tokens: r.usage.reasoning_tokens },
+                                },
+                                model,
+                              )
+                            : null;
+                          const statusOk = (r.status_code ?? 200) < 400;
+                          const durationLabel = r.duration_s != null
+                            ? r.duration_s < 1
+                              ? `${Math.round(r.duration_s * 1000)}ms`
+                              : `${r.duration_s.toFixed(1)}s`
+                            : "—";
+                          return (
+                            <tr
+                              key={i}
+                              className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)] cursor-pointer"
+                              onClick={() => setSelectedResponse(r)}
+                            >
+                              <td className="px-4 py-2.5 mono text-[var(--fg-secondary)] max-w-[180px]">
+                                <span className="block truncate" title={r.custom_id ?? ""}>
+                                  {r.custom_id ?? "—"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <span className={`mono ${statusOk ? "text-[var(--brand)]" : "text-[var(--danger)]"}`}>
+                                  {r.status_code ?? "—"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5 mono text-[var(--fg-muted)] whitespace-nowrap">
+                                {durationLabel}
+                              </td>
+                              <td className="px-4 py-2.5 mono text-[var(--fg-muted)] max-w-[160px]">
+                                <span className="block truncate" title={r.model ?? ""}>
+                                  {r.model ?? "—"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5 mono text-[var(--fg-muted)] max-w-[160px]">
+                                <span className="block truncate" title={r.format_name ?? r.format_type ?? ""}>
+                                  {r.format_name ?? r.format_type ?? "—"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5 mono text-[var(--fg-secondary)]">
+                                {r.reasoning_effort ?? "—"}
+                              </td>
+                              <td className="px-4 py-2.5 mono text-right">
+                                {r.usage ? (
+                                  <div className="flex flex-col gap-0.5">
+                                    <div className="text-[var(--fg-secondary)]">
+                                      <span className="text-[var(--fg-muted)] mr-1">in</span>{r.usage.input_tokens.toLocaleString()}
+                                    </div>
+                                    {r.usage.cached_tokens > 0 && (
+                                      <div className="text-[var(--fg-muted)]">
+                                        <span className="mr-1">cache</span>{r.usage.cached_tokens.toLocaleString()}
+                                      </div>
+                                    )}
+                                    <div className="text-[var(--fg-secondary)]">
+                                      <span className="text-[var(--fg-muted)] mr-1">out</span>{r.usage.output_tokens.toLocaleString()}
+                                    </div>
+                                    {r.usage.reasoning_tokens > 0 && (
+                                      <div className="text-[var(--fg-muted)]">
+                                        <span className="mr-1">rsn</span>{r.usage.reasoning_tokens.toLocaleString()}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : "—"}
+                              </td>
+                              <td className="px-4 py-2.5 mono text-right text-[var(--fg-secondary)]">
+                                {cost ? `$${cost.total.toFixed(4)}` : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {responsesTotal > RESP_LIMIT && (
+                    <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--border)]">
+                      <span className="label-mono text-[var(--fg-muted)]">
+                        {responsesOffset + 1}–{Math.min(responsesOffset + RESP_LIMIT, responsesTotal)} of {responsesTotal.toLocaleString()}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => loadResponses(responsesOffset - RESP_LIMIT)}
+                          disabled={responsesOffset === 0 || responsesLoading}
+                        >
+                          Previous
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => loadResponses(responsesOffset + RESP_LIMIT)}
+                          disabled={responsesOffset + RESP_LIMIT >= responsesTotal || responsesLoading}
+                        >
+                          Next
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+          )}
+        </div>
+      )}
 
       {/* cancel confirm */}
       {confirmOpen && (
@@ -639,6 +837,14 @@ export function BatchDetail({
         <div className="fixed bottom-6 right-6 z-40 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-4 py-3 text-sm">
           {toast}
         </div>
+      )}
+
+      {selectedResponse && (
+        <ResponseModal
+          row={selectedResponse}
+          batchModel={batch.model ?? null}
+          onClose={() => setSelectedResponse(null)}
+        />
       )}
     </div>
   );

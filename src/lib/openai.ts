@@ -17,3 +17,10 @@ export const RUNNING_BATCH_STATUSES = new Set([
   "in_progress",
   "finalizing",
 ]);
+
+export const RESTARTABLE_BATCH_STATUSES = new Set([
+  "completed",
+  "failed",
+  "expired",
+  "cancelled",
+]);
