@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+
+  --bg: #171717;
+  --bg-elevated: #1c1c1c;
+  --bg-button: #0f0f0f;
+  --fg: #fafafa;
+  --fg-secondary: #b4b4b4;
+  --fg-muted: #898989;
+  --fg-dim: #4d4d4d;
+
+  --border-subtle: #242424;
+  --border: #2e2e2e;
+  --border-strong: #363636;
+  --border-stronger: #393939;
+
+  --brand: #3ecf8e;
+  --brand-link: #00c573;
+  --brand-border: rgba(62, 207, 142, 0.3);
+
+  --danger: #e5484d;
+  --warn: #f5a524;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-secondary: var(--fg-secondary);
+  --color-border: var(--border);
+  --color-brand: var(--brand);
+  --color-brand-link: var(--brand-link);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-family: var(--font-geist-sans), "Helvetica Neue", Helvetica, Arial,
+    sans-serif;
+  font-weight: 400;
+  font-feature-settings: "ss01", "cv01";
+}
+
+.mono,
+.label-mono {
+  font-family: var(--font-geist-mono), "Source Code Pro", "Menlo", monospace;
+}
+
+.label-mono {
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+*,
+*::before,
+*::after {
+  border-color: var(--border);
+}
+
+::selection {
+  background: rgba(62, 207, 142, 0.25);
+  color: var(--fg);
+}
+
+/* scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-stronger);
+}
