@@ -1,4 +1,6 @@
 // Batch API pricing per 1M tokens: [input, cached_input, output]
+// Verify at https://platform.openai.com/docs/pricing — last checked 2026-04-19
+// gpt-5.x entries are unverified estimates — update when official pricing is published
 const BATCH_PRICING: Record<string, [number, number | null, number]> = {
   "gpt-5.4":                  [1.25,   0.13,   7.50],
   "gpt-5.4-mini":             [0.375,  0.0375, 2.25],

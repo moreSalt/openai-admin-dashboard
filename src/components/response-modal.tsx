@@ -4,27 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { X, Loader2, AlertCircle } from "lucide-react";
 import { ContentRenderer } from "./content-renderer";
 import { estimateCost } from "@/lib/pricing";
-
-type ResponseRow = {
-  custom_id: string | null;
-  status_code: number | null;
-  id: string | null;
-  model: string | null;
-  duration_s: number | null;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-    cached_tokens: number;
-    reasoning_tokens: number;
-  } | null;
-  format_type: string | null;
-  format_name: string | null;
-  reasoning_effort: string | null;
-  output_text: string | null;
-  raw_body: Record<string, unknown> | null;
-  error: unknown;
-};
+import type { ResponseRow } from "@/lib/batch-output-cache";
 
 type InputItemContent =
   | { type: "input_text"; text: string }
@@ -117,7 +97,7 @@ export function ResponseModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-4"
       onClick={onClose}
     >
       <div

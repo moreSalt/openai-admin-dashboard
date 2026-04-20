@@ -22,8 +22,10 @@ import {
 } from "lucide-react";
 import { estimateCost, type Usage } from "@/lib/pricing";
 import { ResponseModal } from "@/components/response-modal";
-
-const RESTARTABLE = new Set(["completed", "failed", "expired", "cancelled"]);
+import type { ResponseRow } from "@/lib/batch-output-cache";
+import { statusTone } from "@/lib/batch-utils";
+import { RUNNING_BATCH_STATUSES as RUNNING, RESTARTABLE_BATCH_STATUSES as RESTARTABLE } from "@/lib/openai";
+import { db } from "@/lib/db/client";
 
 type Batch = {
   id: string;
@@ -53,38 +55,9 @@ type Batch = {
   } | null;
 };
 
-const RUNNING = new Set(["validating", "in_progress", "finalizing"]);
-
-type ResponseRow = {
-  custom_id: string | null;
-  status_code: number | null;
-  id: string | null;
-  model: string | null;
-  duration_s: number | null;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-    cached_tokens: number;
-    reasoning_tokens: number;
-  } | null;
-  format_type: string | null;
-  format_name: string | null;
-  reasoning_effort: string | null;
-  output_text: string | null;
-  raw_body: Record<string, unknown> | null;
-  error: unknown;
-};
 
 const RESP_LIMIT = 50;
 
-function statusTone(s: string): "success" | "warn" | "danger" | "info" | "neutral" {
-  if (s === "completed") return "success";
-  if (s === "failed" || s === "expired" || s === "cancelled") return "danger";
-  if (s === "cancelling") return "warn";
-  if (RUNNING.has(s)) return "info";
-  return "neutral";
-}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -226,6 +199,7 @@ export function BatchDetail({
   const [responses, setResponses] = useState<ResponseRow[]>([]);
   const [responsesLoading, setResponsesLoading] = useState(false);
   const [responsesError, setResponsesError] = useState<string | null>(null);
+  const [responsesExpired, setResponsesExpired] = useState(false);
   const [responsesOffset, setResponsesOffset] = useState(0);
   const [responsesTotal, setResponsesTotal] = useState(0);
   const [selectedResponse, setSelectedResponse] = useState<ResponseRow | null>(null);
@@ -244,6 +218,7 @@ export function BatchDetail({
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setBatch(body.batch);
+      if (db.isAvailable()) db.upsertBatches([body.batch]).catch(() => {});
     } catch (e) {
       if (showSpinner) setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -251,8 +226,33 @@ export function BatchDetail({
     }
   }, [id]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(!initialBatch); }, [load]);
+  // On mount: hydrate from DB if no initialBatch; always refresh from API
+  useEffect(() => {
+    let cancelled = false;
+    const seedFromDb = async () => {
+      if (initialBatch || !db.isAvailable()) {
+        load(!initialBatch);
+        return;
+      }
+      try {
+        await db.init();
+        const cached = await db.getBatch(id);
+        if (cancelled) return;
+        if (cached) {
+          setBatch(cached as Batch);
+          setLoading(false);
+          load(false);
+        } else {
+          load(true);
+        }
+      } catch {
+        load(true);
+      }
+    };
+    seedFromDb();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   // close on Escape when in modal mode
   useEffect(() => {
@@ -314,20 +314,49 @@ export function BatchDetail({
   const loadResponses = useCallback(async (offset: number) => {
     setResponsesLoading(true);
     setResponsesError(null);
+    const fileId = batch?.output_file_id ?? null;
     try {
+      if (fileId && db.isAvailable()) {
+        try {
+          const info = await db.getResponsesCacheInfo(fileId);
+          if (info.rowCount !== null && offset < info.rowCount) {
+            const rows = await db.getResponses(fileId, offset, RESP_LIMIT);
+            if (rows.length > 0) {
+              setResponsesExpired(false);
+              setResponses(rows);
+              setResponsesTotal(info.rowCount);
+              setResponsesOffset(offset);
+              setResponsesLoaded(true);
+              setResponsesLoading(false);
+              return;
+            }
+          }
+        } catch {}
+      }
+
       const res = await fetch(`/api/batches/${id}/responses?limit=${RESP_LIMIT}&offset=${offset}`, { cache: "no-store" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setResponsesExpired(body.expired === true);
       setResponses(body.responses);
       setResponsesTotal(body.total);
       setResponsesOffset(offset);
       setResponsesLoaded(true);
+      if (fileId && !body.expired && Array.isArray(body.responses) && body.responses.length > 0 && db.isAvailable()) {
+        db.upsertResponses({
+          fileId,
+          batchId: id,
+          rows: body.responses,
+          offset,
+          total: body.total,
+        }).catch(() => {});
+      }
     } catch (e) {
       setResponsesError(e instanceof Error ? e.message : "Failed to load responses");
     } finally {
       setResponsesLoading(false);
     }
-  }, [id]);
+  }, [id, batch?.output_file_id]);
 
   const handleToggleResponses = () => {
     const next = !responsesOpen;
@@ -354,7 +383,7 @@ export function BatchDetail({
 
   if (error) {
     return (
-      <div className={onClose ? "p-6" : "px-8 py-6"}>
+      <div className={onClose ? "p-4 sm:p-6" : "px-4 py-4 sm:px-6 md:px-8 md:py-6"}>
         {!onClose && (
           <Link
             href="/batches"
@@ -383,9 +412,9 @@ export function BatchDetail({
   const isRunning = RUNNING.has(batch.status);
 
   return (
-    <div className={onClose ? "p-6" : "px-8 py-6"}>
+    <div className={onClose ? "p-4 sm:p-6" : "px-4 py-4 sm:px-6 md:px-8 md:py-6"}>
       {/* nav bar */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-6">
         {onClose ? (
           <button
             onClick={onClose}
@@ -408,6 +437,7 @@ export function BatchDetail({
             <Link
               href={`/batches/${id}`}
               target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-muted)] hover:text-[var(--fg)] transition-colors"
             >
               <ExternalLink className="size-3.5" />
@@ -480,9 +510,9 @@ export function BatchDetail({
       </div>
 
       {tab === "details" && (
-      <div className="grid grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         {/* left col */}
-        <div className="col-span-2 flex flex-col gap-5">
+        <div className="md:col-span-2 flex flex-col gap-5">
           {/* progress */}
           <div className="rounded-lg border border-[var(--border)] p-5">
             <h2 className="text-sm font-medium mb-4">Requests</h2>
@@ -676,6 +706,8 @@ export function BatchDetail({
               <AlertCircle className="size-4 shrink-0" />
               {responsesError}
             </div>
+          ) : responsesExpired ? (
+            <div className="p-5 text-sm text-[var(--fg-muted)]">Output file expired and was deleted by OpenAI.</div>
           ) : responses.length === 0 ? (
             <div className="p-5 text-sm text-[var(--fg-muted)]">No responses found.</div>
           ) : (

@@ -5,7 +5,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get("id");
-  const filename = req.nextUrl.searchParams.get("filename") ?? id ?? "file";
+  const raw = req.nextUrl.searchParams.get("filename") ?? id ?? "file";
+  const filename = raw.replace(/["'\r\n\\]/g, "");
 
   if (!id) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });

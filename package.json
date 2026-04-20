@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "copy-wasm": "mkdir -p public/sqlite-wasm && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm public/sqlite-wasm/sqlite3.wasm",
+    "predev": "npm run copy-wasm",
+    "prebuild": "npm run copy-wasm",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -11,6 +14,7 @@
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-slot": "^1.2.4",
+    "@sqlite.org/sqlite-wasm": "^3.51.2-build9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.8.0",

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatBytes, formatRelative } from "@/lib/utils";
 import { RefreshCw, AlertCircle, Loader2, FileText, Download, ChevronDown, ChevronLeft, ChevronRight, Search, X } from "lucide-react";
+import { db } from "@/lib/db/client";
 
 type FileObj = {
   id: string;
@@ -15,7 +16,7 @@ type FileObj = {
   status?: string;
 };
 
-const FILES_CACHE_KEY = "batchdash:files";
+const FILES_CURSOR_META_KEY = "files_cursor";
 
 function purposeTone(p: string): "success" | "info" | "warn" | "neutral" {
   if (p === "batch") return "info";
@@ -50,20 +51,17 @@ export function StorageClient() {
   const [query, setQuery] = useState("");
 
   const load = useCallback(async (force = false) => {
-    if (!force) {
+    if (!force && db.isAvailable()) {
       try {
-        const raw = sessionStorage.getItem(FILES_CACHE_KEY);
-        if (raw) {
-          const { files: cached, cursor } = JSON.parse(raw) as { files: FileObj[]; cursor: string | null };
-          setFiles(cached);
-          setContinueCursor(cursor);
+        await db.init();
+        const cached = await db.getFiles();
+        const cursor = await db.getMeta(FILES_CURSOR_META_KEY);
+        if (cached.length > 0) {
+          setFiles(cached as FileObj[]);
+          setContinueCursor(cursor && cursor.length > 0 ? cursor : null);
           return;
         }
       } catch {}
-    }
-
-    if (force) {
-      try { sessionStorage.removeItem(FILES_CACHE_KEY); } catch {}
     }
 
     setLoading(true);
@@ -80,10 +78,11 @@ export function StorageClient() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setFiles(body.files);
+      db.upsertFiles(body.files, force).catch(() => {});
       setLoading(false);
 
       if (!body.has_more) {
-        try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: body.files, cursor: null })); } catch {}
+        db.setMeta(FILES_CURSOR_META_KEY, "").catch(() => {});
         return;
       }
 
@@ -98,13 +97,14 @@ export function StorageClient() {
         if (!r.ok) break;
         collected = [...collected, ...b.files];
         setFiles(collected);
+        db.upsertFiles(b.files).catch(() => {});
         cursor = b.has_more && collected.length < MAX_FILES ? b.next_cursor : null;
         if (!b.has_more) break;
       }
 
       const finalCursor = collected.length >= MAX_FILES ? cursor : null;
       setContinueCursor(finalCursor);
-      try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: collected, cursor: finalCursor })); } catch {}
+      db.setMeta(FILES_CURSOR_META_KEY, finalCursor ?? "").catch(() => {});
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
       setLoading(false);
@@ -118,33 +118,29 @@ export function StorageClient() {
     setLoadingMore(true);
     setContinueCursor(null);
     let cursor: string | null = continueCursor;
-    let existing: FileObj[] = [];
-    try {
-      const raw = sessionStorage.getItem(FILES_CACHE_KEY);
-      if (raw) existing = (JSON.parse(raw) as { files: FileObj[] }).files ?? [];
-    } catch {}
+    const existing: FileObj[] = files ?? [];
 
     try {
       let added: FileObj[] = [];
       while (cursor && added.length < MAX_FILES) {
-        const r = await fetch(`/api/files?limit=100&after=${cursor}`, { cache: "no-store" });
+        const r: Response = await fetch(`/api/files?limit=100&after=${cursor}`, { cache: "no-store" });
         const b = await r.json();
         if (!r.ok) break;
         added = [...added, ...b.files];
         setFiles([...existing, ...added]);
+        db.upsertFiles(b.files).catch(() => {});
         cursor = b.has_more ? b.next_cursor : null;
         if (!b.has_more) break;
       }
       const finalCursor = cursor ?? null;
       setContinueCursor(finalCursor);
-      const all = [...existing, ...added];
-      try { sessionStorage.setItem(FILES_CACHE_KEY, JSON.stringify({ files: all, cursor: finalCursor })); } catch {}
+      db.setMeta(FILES_CURSOR_META_KEY, finalCursor ?? "").catch(() => {});
     } catch {
       // silently stop
     } finally {
       setLoadingMore(false);
     }
-  }, [continueCursor, loadingMore]);
+  }, [continueCursor, loadingMore, files]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -198,8 +194,8 @@ export function StorageClient() {
   }
 
   return (
-    <div className="px-8 py-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="px-4 py-4 sm:px-6 md:px-8 md:py-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <span className="label-mono inline-flex items-center gap-2">
           {files == null
             ? "loading"
@@ -229,27 +225,29 @@ export function StorageClient() {
         </div>
       </div>
 
-      <div className="relative flex items-center mb-4">
-        <Search className="absolute left-3 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
-        <input
-          type="text"
-          placeholder="Search by filename, ID, purpose…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="h-9 w-full max-w-lg rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
-        />
-        {query && (
-          <>
+      <div className="flex items-center gap-3 mb-4">
+        <div className="relative flex-1 sm:max-w-lg">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search by filename, ID, purpose…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-9 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
+          />
+          {query && (
             <button
               onClick={() => setQuery("")}
-              className="absolute left-[calc(min(100%,32rem)-24px)] text-[var(--fg-muted)] hover:text-[var(--fg)]"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--fg-muted)] hover:text-[var(--fg)]"
             >
               <X className="size-3.5" />
             </button>
-            <span className="ml-3 text-xs text-[var(--fg-muted)]">
-              {filtered?.length ?? 0} result{(filtered?.length ?? 0) !== 1 ? "s" : ""}
-            </span>
-          </>
+          )}
+        </div>
+        {query && (
+          <span className="text-xs text-[var(--fg-muted)]">
+            {filtered?.length ?? 0} result{(filtered?.length ?? 0) !== 1 ? "s" : ""}
+          </span>
         )}
       </div>
 
@@ -264,7 +262,8 @@ export function StorageClient() {
       )}
 
       <div className="rounded-lg border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
           <thead className="bg-[var(--bg-elevated)] text-[var(--fg-muted)]">
             <tr className="label-mono">
               <th className="px-4 py-2.5 w-8">
@@ -350,9 +349,10 @@ export function StorageClient() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
-      <div className="flex items-center justify-between mt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
         <span className="label-mono text-[var(--fg-muted)] inline-flex items-center gap-2">
           {query
             ? `${filtered?.length ?? 0} results · page ${safePage + 1} of ${totalPages}`

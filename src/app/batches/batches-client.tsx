@@ -18,10 +18,12 @@ import {
   Search,
   X,
   Circle,
-  ChevronRight as ArrowRight,
   Tags,
   RotateCcw,
 } from "lucide-react";
+import { RUNNING_BATCH_STATUSES as RUNNING, RESTARTABLE_BATCH_STATUSES as RESTARTABLE } from "@/lib/openai";
+import { statusTone } from "@/lib/batch-utils";
+import { db } from "@/lib/db/client";
 
 type Batch = {
   id: string;
@@ -38,20 +40,9 @@ type Batch = {
   usage?: Usage | null;
 };
 
-const RUNNING = new Set(["validating", "in_progress", "finalizing"]);
-const RESTARTABLE = new Set(["completed", "failed", "expired", "cancelled"]);
 const PAGE_SIZE = 20;
-const CACHE_KEY = "batchdash:batches";
+const CURSOR_META_KEY = "batches_cursor";
 
-function statusTone(
-  s: string,
-): "success" | "warn" | "danger" | "info" | "neutral" {
-  if (s === "completed") return "success";
-  if (s === "failed" || s === "expired" || s === "cancelled") return "danger";
-  if (s === "cancelling") return "warn";
-  if (RUNNING.has(s)) return "info";
-  return "neutral";
-}
 
 export function BatchesClient() {
   const [allBatches, setAllBatches] = useState<Batch[]>([]);
@@ -77,47 +68,77 @@ export function BatchesClient() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  const saveCache = (batches: Batch[], cursor: string | null) => {
-    try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ batches, cursor })); } catch {}
+  const persistBatches = (batches: Batch[]) => {
+    db.upsertBatches(batches).catch(() => {});
   };
 
-  const pollNewBatches = useCallback(async () => {
+  const persistCursor = (cursor: string | null) => {
+    db.setMeta(CURSOR_META_KEY, cursor ?? "").catch(() => {});
+  };
+
+  const poll = useCallback(async () => {
     if (allBatches.length === 0) return;
     try {
+      // 1. check for new batches at the top of the list
       const res = await fetch("/api/batches?limit=100", { cache: "no-store" });
       const body = await res.json();
-      if (!res.ok) return;
-      const existingIds = new Set(allBatches.map((b) => b.id));
-      const fresh = (body.batches as Batch[]).filter((b) => !existingIds.has(b.id));
-      if (fresh.length === 0) return;
-      const next = [...fresh, ...allBatches];
-      setAllBatches(next);
-      saveCache(next, continueCursor);
+      let next = allBatches;
+      const toPersist: Batch[] = [];
+      if (res.ok) {
+        const existingIds = new Set(allBatches.map((b) => b.id));
+        const fresh = (body.batches as Batch[]).filter((b) => !existingIds.has(b.id));
+        if (fresh.length > 0) {
+          next = [...fresh, ...allBatches];
+          toPersist.push(...fresh);
+        }
+      }
+
+      // 2. refresh status for any currently-running batches
+      const running = next.filter((b) => RUNNING.has(b.status));
+      if (running.length > 0) {
+        const updates = await Promise.allSettled(
+          running.map((b) =>
+            fetch(`/api/batches/${b.id}`, { cache: "no-store" }).then((r) => r.json()),
+          ),
+        );
+        const updatedMap = new Map<string, Batch>();
+        updates.forEach((r, i) => {
+          if (r.status === "fulfilled" && r.value.batch) {
+            updatedMap.set(running[i].id, r.value.batch as Batch);
+          }
+        });
+        if (updatedMap.size > 0) {
+          next = next.map((b) => updatedMap.get(b.id) ?? b);
+          toPersist.push(...updatedMap.values());
+        }
+      }
+
+      if (next !== allBatches) {
+        setAllBatches(next);
+        if (toPersist.length > 0) persistBatches(toPersist);
+      }
     } catch {}
-  }, [allBatches, continueCursor]);
+  }, [allBatches]);
 
   useEffect(() => {
-    const id = setInterval(pollNewBatches, 30_000);
+    const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [pollNewBatches]);
+  }, [poll]);
 
   const load = useCallback(async (force = false) => {
-    if (!force) {
+    if (!force && db.isAvailable()) {
       try {
-        const raw = sessionStorage.getItem(CACHE_KEY);
-        if (raw) {
-          const { batches, cursor } = JSON.parse(raw) as { batches: Batch[]; cursor: string | null };
-          setAllBatches(batches);
-          setContinueCursor(cursor);
+        await db.init();
+        const cached = await db.getBatches();
+        const cursor = await db.getMeta(CURSOR_META_KEY);
+        if (cached.length > 0) {
+          setAllBatches(cached as Batch[]);
+          setContinueCursor(cursor && cursor.length > 0 ? cursor : null);
           setPage(0);
           setSelected(new Set());
           return;
         }
       } catch {}
-    }
-
-    if (force) {
-      try { sessionStorage.removeItem(CACHE_KEY); } catch {}
     }
 
     setLoading(true);
@@ -141,9 +162,10 @@ export function BatchesClient() {
         const body = await res.json();
         if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
         collected.push(...body.batches);
+        persistBatches(body.batches);
         if (!body.has_more) {
           setAllBatches(collected);
-          saveCache(collected, null);
+          persistCursor(null);
           setLoading(false);
           return;
         }
@@ -155,7 +177,6 @@ export function BatchesClient() {
       // background: fetch 500 at a time, append each chunk, stop at MAX
       setLoadingMore(true);
       let total = collected.length;
-      let allFetched = [...collected];
       while (cursor && total < MAX) {
         const chunk: Batch[] = [];
         while (chunk.length < 500 && cursor && total + chunk.length < MAX) {
@@ -168,14 +189,14 @@ export function BatchesClient() {
         }
         if (chunk.length > 0) {
           setAllBatches((prev) => [...prev, ...chunk]);
-          allFetched = [...allFetched, ...chunk];
+          persistBatches(chunk);
           total += chunk.length;
         }
         if (!cursor) break;
       }
       // stopped at MAX — save cursor so user can continue
       if (cursor) setContinueCursor(cursor);
-      saveCache(allFetched, cursor ?? null);
+      persistCursor(cursor ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
       setLoading(false);
@@ -192,14 +213,6 @@ export function BatchesClient() {
     setContinueCursor(null);
     let cursor: string | null = continueCursor;
     let added = 0;
-    const newChunks: Batch[] = [];
-
-    // Snapshot existing batches from cache to build the full list for saveCache
-    let existingBatches: Batch[] = [];
-    try {
-      const raw = sessionStorage.getItem(CACHE_KEY);
-      if (raw) existingBatches = (JSON.parse(raw) as { batches: Batch[] }).batches ?? [];
-    } catch {}
 
     try {
       while (cursor && added < 5000) {
@@ -214,13 +227,13 @@ export function BatchesClient() {
         }
         if (chunk.length > 0) {
           setAllBatches((prev) => [...prev, ...chunk]);
-          newChunks.push(...chunk);
+          persistBatches(chunk);
           added += chunk.length;
         }
         if (!cursor) break;
       }
       if (cursor) setContinueCursor(cursor);
-      saveCache([...existingBatches, ...newChunks], cursor ?? null);
+      persistCursor(cursor ?? null);
     } catch {
       // silently stop; user can retry
     } finally {
@@ -362,7 +375,7 @@ export function BatchesClient() {
     confirmTarget === "all" ? allRunning.length : cancellableSelected.length;
 
   return (
-    <div className="px-8 py-6 pb-24">
+    <div className="px-4 py-4 pb-24 sm:px-6 md:px-8 md:py-6">
       {/* stat strip */}
       <div className="flex items-center gap-3 mb-5 flex-wrap">
         {loading ? (
@@ -392,7 +405,7 @@ export function BatchesClient() {
             )}
           </>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           {stats.running > 0 && (
             <Button variant="danger" size="sm" onClick={() => setConfirmTarget("all")} disabled={cancelling}>
               <Ban className="size-3.5" />
@@ -407,25 +420,27 @@ export function BatchesClient() {
       </div>
 
       {/* search */}
-      <div className="relative flex items-center mb-4">
-        <Search className="absolute left-3 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
-        <input
-          type="text"
-          placeholder="Search all batches by ID, status, endpoint, metadata…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="h-9 w-full max-w-lg rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
-        />
+      <div className="flex items-center gap-3 mb-4">
+        <div className="relative flex-1 sm:max-w-lg">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search all batches by ID, status, endpoint, metadata…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-9 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--fg-muted)] hover:text-[var(--fg)]"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
         {query && (
-          <button
-            onClick={() => setQuery("")}
-            className="absolute left-[calc(min(100%,32rem)-24px)] text-[var(--fg-muted)] hover:text-[var(--fg)]"
-          >
-            <X className="size-3.5" />
-          </button>
-        )}
-        {query && (
-          <span className="ml-3 text-xs text-[var(--fg-muted)]">
+          <span className="text-xs text-[var(--fg-muted)]">
             {filtered.length} result{filtered.length !== 1 ? "s" : ""}
           </span>
         )}
@@ -443,7 +458,8 @@ export function BatchesClient() {
 
       {/* table */}
       <div className="rounded-lg border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-sm">
           <thead className="bg-[var(--bg-elevated)] text-[var(--fg-muted)]">
             <tr className="label-mono">
               <th className="px-4 py-2.5 w-10">
@@ -491,9 +507,8 @@ export function BatchesClient() {
                 const isExpanded = expanded.has(b.id);
 
                 return (
-                  <>
+                  <React.Fragment key={b.id}>
                   <tr
-                    key={b.id}
                     className={`border-t border-[var(--border)] transition-colors cursor-pointer ${
                       isSelected
                         ? "bg-[rgba(62,207,142,0.04)]"
@@ -529,7 +544,7 @@ export function BatchesClient() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       {total > 0 ? (
-                        <div className="inline-flex flex-col items-end gap-1 min-w-[120px]">
+                        <div className="inline-flex flex-col items-end gap-1 min-w-[100px] sm:min-w-[140px]">
                           <span className="text-xs text-[var(--fg-secondary)]">
                             {done}/{total}
                             {failed > 0 && (
@@ -635,16 +650,17 @@ export function BatchesClient() {
                       </td>
                     </tr>
                   )}
-                  </>
+                  </React.Fragment>
                 );
               })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* pagination */}
-      <div className="flex items-center justify-between mt-4">
-        <span className="label-mono text-[var(--fg-muted)] inline-flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
+        <span className="label-mono text-[var(--fg-muted)] inline-flex items-center gap-2 text-xs sm:text-sm">
           {query
             ? `${filtered.length} results · page ${safePage + 1} of ${totalPages}`
             : `${allBatches.length}${loadingMore ? "+" : ""} batches · page ${safePage + 1} of ${totalPages}`}
