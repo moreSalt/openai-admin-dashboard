@@ -20,10 +20,16 @@ import {
   Circle,
   Tags,
   RotateCcw,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from "lucide-react";
 import { RUNNING_BATCH_STATUSES as RUNNING, RESTARTABLE_BATCH_STATUSES as RESTARTABLE } from "@/lib/openai";
 import { statusTone } from "@/lib/batch-utils";
 import { db } from "@/lib/db/client";
+
+type SortKey = "created" | "status" | "progress" | "cost";
+type SortDir = "asc" | "desc";
 
 type Batch = {
   id: string;
@@ -52,6 +58,19 @@ export function BatchesClient() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(0);
+
+  const [sortKey, setSortKey] = useState<SortKey>("created");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+    setPage(0);
+  };
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -264,9 +283,38 @@ export function BatchesClient() {
     );
   }, [allBatches, query]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const sorted = useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "created":
+          cmp = a.created_at - b.created_at;
+          break;
+        case "status":
+          cmp = a.status.localeCompare(b.status);
+          break;
+        case "progress": {
+          const tot = (x: Batch) => x.request_counts?.total ?? 0;
+          const done = (x: Batch) => (x.request_counts?.completed ?? 0) + (x.request_counts?.failed ?? 0);
+          const pctA = tot(a) > 0 ? done(a) / tot(a) : 0;
+          const pctB = tot(b) > 0 ? done(b) / tot(b) : 0;
+          cmp = pctA - pctB;
+          break;
+        }
+        case "cost": {
+          const costA = a.usage && a.model ? (estimateCost(a.usage, a.model)?.total ?? 0) : 0;
+          const costB = b.usage && b.model ? (estimateCost(b.usage, b.model)?.total ?? 0) : 0;
+          cmp = costA - costB;
+          break;
+        }
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
-  const pageRows = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+  const pageRows = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   // reset page when query changes
   useEffect(() => { setPage(0); }, [query]);
@@ -471,11 +519,19 @@ export function BatchesClient() {
                 />
               </th>
               <th className="text-left font-normal px-4 py-2.5">Batch ID</th>
-              <th className="text-left font-normal px-4 py-2.5">Status</th>
+              <th className="text-left font-normal px-4 py-2.5">
+                <SortHeader label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+              </th>
               <th className="text-left font-normal px-4 py-2.5">Endpoint</th>
-              <th className="text-right font-normal px-4 py-2.5">Progress</th>
-              <th className="text-right font-normal px-4 py-2.5">Cost</th>
-              <th className="text-right font-normal px-4 py-2.5">Created</th>
+              <th className="text-right font-normal px-4 py-2.5">
+                <SortHeader label="Progress" col="progress" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+              </th>
+              <th className="text-right font-normal px-4 py-2.5">
+                <SortHeader label="Cost" col="cost" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+              </th>
+              <th className="text-right font-normal px-4 py-2.5">
+                <SortHeader label="Created" col="created" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+              </th>
               <th className="text-left font-normal px-4 py-2.5">Meta</th>
               <th className="w-16 px-4 py-2.5" />
             </tr>
@@ -662,7 +718,7 @@ export function BatchesClient() {
       <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
         <span className="label-mono text-[var(--fg-muted)] inline-flex items-center gap-2 text-xs sm:text-sm">
           {query
-            ? `${filtered.length} results · page ${safePage + 1} of ${totalPages}`
+            ? `${sorted.length} results · page ${safePage + 1} of ${totalPages}`
             : `${allBatches.length}${loadingMore ? "+" : ""} batches · page ${safePage + 1} of ${totalPages}`}
           {loadingMore && <Loader2 className="size-3 animate-spin" />}
         </span>
@@ -727,6 +783,37 @@ export function BatchesClient() {
         </div>
       )}
     </div>
+  );
+}
+
+function SortHeader({
+  label,
+  col,
+  sortKey,
+  sortDir,
+  onSort,
+  align,
+}: {
+  label: string;
+  col: SortKey;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
+  align?: "left" | "right";
+}) {
+  const active = sortKey === col;
+  return (
+    <button
+      onClick={() => onSort(col)}
+      className={`inline-flex items-center gap-1 hover:text-[var(--fg)] transition-colors ${active ? "text-[var(--fg)]" : ""} ${align === "right" ? "flex-row-reverse" : ""}`}
+    >
+      {label}
+      {active ? (
+        sortDir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />
+      ) : (
+        <ArrowUpDown className="size-3 opacity-40" />
+      )}
+    </button>
   );
 }
 

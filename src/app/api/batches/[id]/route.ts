@@ -14,7 +14,7 @@ export async function GET(
     const batch = await client.batches.retrieve(id);
 
     // Use the API's native usage if present; otherwise aggregate from output file.
-    let usage = (batch as Record<string, unknown>).usage ?? null;
+    let usage = (batch as unknown as Record<string, unknown>).usage ?? null;
     if (!usage && batch.output_file_id) {
       try {
         const parsed = await getOutputData(batch.output_file_id, client);

@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
-import { Layers, HardDrive, CircleDot, X } from "lucide-react";
+import { Layers, HardDrive, CircleDot, X, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const nav = [
   { href: "/batches", label: "Batches", icon: Layers },
+  { href: "/usage", label: "Usage", icon: BarChart3 },
   { href: "/storage", label: "Storage", icon: HardDrive },
 ];
 

@@ -1,58 +1,74 @@
 # OpenAI Batch Dashboard
 
-A self-hosted Next.js dashboard for monitoring and managing OpenAI Batch API jobs and file storage. Built with a Supabase-inspired dark UI.
+Self-hosted Next.js dashboard for monitoring and managing OpenAI Batch API jobs and file storage. Dark-mode UI inspired by Supabase.
 
-![Next.js](https://img.shields.io/badge/Next.js-16-black) ![React](https://img.shields.io/badge/React-19-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-v4-06B6D4)
+![Next.js](https://img.shields.io/badge/Next.js-16-black) ![React](https://img.shields.io/badge/React-19-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-v4-06B6D4) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6) ![License](https://img.shields.io/badge/license-MIT-green)
+
+> Your OpenAI API key stays on your machine. All calls are proxied from your own Next.js server — nothing is sent to a third party.
+
+## Why
+
+The OpenAI dashboard shows batches, but it won't let you cancel many at once, restart a failed job without re-uploading the file, estimate cost before running, or browse per-response output as a conversation. This does.
 
 ## Features
 
-**Batches**
-- List all batches with live status, progress bars, token usage, and estimated cost
-- Search across all batches by ID, status, endpoint, or metadata
-- Expand metadata tags inline per row
-- Cancel running batches (individually or all at once)
-- Restart completed/failed/expired batches (re-submits the same input file)
-- View per-batch detail: request counts, token usage, cost breakdown, timeline, files
-- Browse batch responses with pagination — conversation view (input + assistant output) and raw JSON
-- Lazy-loads up to 5,000 batches with background pagination; session-cached to avoid re-fetching
+### Batches
+- List every batch with live status, progress bar, token usage, and **estimated cost**
+- Search across ID, status, endpoint, or metadata
+- **Cancel** running batches individually or in bulk
+- **Restart** completed, failed, or expired batches (re-submits the original input file — no re-upload)
+- Per-batch detail: request counts, token breakdown, cost split, timeline, associated files
+- Browse responses with pagination — **conversation view** (input + assistant output rendered as markdown) or raw JSON
+- Auto-polls for new batches every 30s
 
-**Storage**
-- List all uploaded files with filename, purpose, size, and creation date
+### Storage
+- List uploaded files with filename, purpose, size, created date
 - Search by filename, file ID, or purpose
-- Select and download files (triggers browser downloads)
-- Lazy-loads up to 500 files with background pagination
+- Download files directly via the browser
 
-**Cost Estimation**
-- Estimates batch cost for 30+ models (GPT-5.x, GPT-4.x, o-series, GPT-3.5) using Batch API pricing
-- Breaks down input, cached input, and output costs separately
+### Usage
+- Organization-wide token and cost usage from OpenAI's Admin API
+- Tabs for Completions, Costs, Embeddings, Images, Audio, Moderations, Vector stores, Code interpreter
+- 24h / 7d / 30d / 90d ranges, 1d or 1h buckets, optional batch-only filter
+- Requires a separate `OPENAI_ADMIN_KEY` (see Configuration)
 
-**UI**
-- Dark-mode-only, Supabase-inspired design system
-- Fully mobile-responsive: collapsible sidebar drawer, horizontal-scrolling tables, stacking layouts
+### Cost Estimation
+- Batch API pricing for 30+ models (GPT-5.x, GPT-4.x, o-series, GPT-3.5)
+- Splits input, cached input, and output costs
+- All estimates reflect the 50% Batch API discount
 
-## Setup
+### Local-First Caching
+- Uses **SQLite (WASM)** in a Web Worker, persisted to **OPFS**, to cache batches, files, and response outputs across reloads
+- Falls back to in-memory SQLite when OPFS is unavailable
+- Lazy-loads up to 5,000 batches and 500 files with background pagination
 
-**Prerequisites:** Node.js 18+, an OpenAI API key.
+### UI
+- Supabase-inspired dark theme — never pure black, sparing emerald accents, border-defined depth
+- Mobile-responsive: collapsible drawer, horizontal-scrolling tables, stacking layouts
+
+## Quick Start
+
+**Requirements:** Node.js 18+, an OpenAI API key.
 
 ```bash
-git clone <repo>
+git clone https://github.com/<your-fork>/openai-batch-dashboard
 cd openai-batch-dashboard
 npm install
-```
-
-Copy the env example and add your key:
-
-```bash
 cp .env.local.example .env.local
-# edit .env.local
-OPENAI_API_KEY=sk-...
+# edit .env.local and set OPENAI_API_KEY=sk-...
+npm run dev
 ```
 
-```bash
-npm run dev      # http://localhost:3000
-npm run build    # production build
-npm start        # serve production build
-```
+Open [http://localhost:3000](http://localhost:3000).
+
+### Scripts
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Start dev server (auto-copies sqlite-wasm to `public/`) |
+| `npm run build` | Production build |
+| `npm start` | Serve production build |
+| `npm run lint` | ESLint |
 
 ## Stack
 
@@ -60,10 +76,11 @@ npm start        # serve production build
 |---|---|
 | Framework | Next.js 16 (App Router) |
 | UI | React 19 + Tailwind CSS v4 |
+| Components | Radix UI primitives + CVA |
 | Icons | lucide-react |
-| OpenAI | openai SDK v6 |
+| OpenAI | `openai` SDK v6 |
+| Cache | `@sqlite.org/sqlite-wasm` (OPFS-SAH) in a Web Worker |
 | Markdown | react-markdown + remark-gfm |
-| Styling util | clsx + tailwind-merge + CVA |
 
 ## Project Structure
 
@@ -71,48 +88,75 @@ npm start        # serve production build
 src/
   app/
     batches/
-      page.tsx               # Batches list page
-      batches-client.tsx     # Full list UI: table, search, pagination, modals
+      page.tsx              # Batches list page
+      batches-client.tsx    # Table, search, pagination, modals
       [id]/
-        page.tsx             # Batch detail page (direct URL)
-        batch-detail.tsx     # Detail UI: tabs, timeline, responses table
+        page.tsx            # Batch detail (direct URL)
+        batch-detail.tsx    # Tabs, timeline, responses table
     storage/
-      page.tsx               # Storage page
-      storage-client.tsx     # File list UI
+      page.tsx
+      storage-client.tsx    # File list UI
     api/
-      batches/               # List, get, cancel, restart batch endpoints
-      files/                 # List, download file endpoints
-      responses/             # Response input_items endpoint
+      batches/              # list, get, cancel, restart
+      files/                # list, download
+      responses/            # response input_items proxy
   components/
-    layout-shell.tsx         # Client wrapper — owns mobile drawer state
-    sidebar.tsx              # Nav sidebar (drawer on mobile, static on desktop)
-    mobile-topbar.tsx        # Mobile-only top bar with hamburger
-    page-header.tsx          # Shared page header
-    response-modal.tsx       # Per-response conversation + raw JSON modal
-    ui/button.tsx            # CVA button component
-    ui/badge.tsx             # Status/purpose badge
+    layout-shell.tsx        # Mobile drawer state
+    sidebar.tsx             # Drawer on mobile, static on desktop
+    mobile-topbar.tsx
+    page-header.tsx
+    response-modal.tsx      # Conversation + raw JSON
+    ui/                     # button, badge (CVA)
   lib/
-    pricing.ts               # Batch API cost estimation
-    utils.ts                 # cn(), formatRelative(), formatBytes(), formatDate()
+    db/                     # SQLite worker + typed client
+    pricing.ts              # Batch API cost estimation
+    batch-output-cache.ts   # Response output caching layer
+    utils.ts                # cn, formatRelative, formatBytes, formatDate
 ```
 
 ## API Routes
 
-All routes proxy to the OpenAI API using the `OPENAI_API_KEY` env var.
+All routes proxy to OpenAI using `OPENAI_API_KEY`. The key never leaves your server.
 
 | Route | Method | Description |
 |---|---|---|
 | `/api/batches` | GET | List batches (`limit`, `after` cursor) |
 | `/api/batches/[id]` | GET | Get single batch |
-| `/api/batches/cancel` | POST | Cancel one or more batches by ID |
-| `/api/batches/restart` | POST | Clone and re-submit batches by ID |
+| `/api/batches/cancel` | POST | Cancel one or more batches |
+| `/api/batches/restart` | POST | Clone and re-submit batches |
 | `/api/files` | GET | List files (`limit`, `after` cursor) |
-| `/api/files/download` | GET | Stream file content as download |
+| `/api/files/download` | GET | Stream file content |
 | `/api/responses/[id]/input_items` | GET | Fetch response input items |
+| `/api/usage` | GET | Org usage / costs (requires `OPENAI_ADMIN_KEY`). Params: `type`, `start_time`, `end_time`, `bucket_width`, `group_by`, `batch`, `limit`, `page` |
+
+## Configuration
+
+Only one env var is required:
+
+```env
+OPENAI_API_KEY=sk-...
+```
+
+Optional — enables the `/usage` page:
+
+```env
+OPENAI_ADMIN_KEY=sk-admin-...
+```
+
+This must be an **admin** key (created at *platform.openai.com → Settings → Admin keys*), not a project key. Admin keys only work on `/v1/organization/*` endpoints; they cannot fetch batches or files. Leave it unset and `/usage` shows a friendly empty state while the rest of the app works normally.
+
+Runs fine on Vercel, Fly, Railway, or any Node host. If you deploy publicly, put it behind auth — the dashboard has no auth layer of its own.
 
 ## Notes
 
-- All data is fetched client-side on page load and cached in `sessionStorage`. Refresh clears the cache.
-- Batches auto-poll for new items every 30 seconds.
-- Cost estimates use Batch API rates (50% discount vs. standard API) and are approximations.
-- The TypeScript strict build has one pre-existing error in `storage-client.tsx` (implicit `any` on a fetch variable) that does not affect runtime behavior.
+- Cost estimates use Batch API rates and are approximations; check your OpenAI bill for the authoritative number.
+- Restart copies the original input file on OpenAI's side and submits a fresh batch — your local file storage is not touched.
+- OPFS-SAH requires cross-origin isolation headers when served over HTTPS; locally it Just Works.
+
+## Contributing
+
+Issues and PRs welcome. See `TODO.md` for known gaps. `DESIGN.md` documents the Supabase-inspired design tokens if you're adding UI.
+
+## License
+
+MIT
