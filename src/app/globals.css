@@ -27,7 +27,8 @@
 @theme inline {
   --color-background: var(--bg);
   --color-foreground: var(--fg);
-  --color-muted: var(--fg-muted);
+  --color-muted: var(--bg-elevated);
+  --color-muted-foreground: var(--fg-muted);
   --color-secondary: var(--fg-secondary);
   --color-border: var(--border);
   --color-brand: var(--brand);

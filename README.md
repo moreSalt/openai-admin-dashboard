@@ -1,10 +1,16 @@
 # OpenAI Batch Dashboard
 
-Self-hosted Next.js dashboard for monitoring and managing OpenAI Batch API jobs and file storage. Dark-mode UI inspired by Supabase.
+Self-hosted dashboard for monitoring and managing OpenAI Batch API jobs, usage and file storage.
 
 ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![React](https://img.shields.io/badge/React-19-blue) ![Tailwind](https://img.shields.io/badge/Tailwind-v4-06B6D4) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6) ![License](https://img.shields.io/badge/license-MIT-green)
 
 > Your OpenAI API key stays on your machine. All calls are proxied from your own Next.js server — nothing is sent to a third party.
+
+## Screenshots
+
+![Batches](public/screenshots/batches.png)
+![Storage](public/screenshots/storage.png)
+![Usage](public/screenshots/usage.png)
 
 ## Why
 

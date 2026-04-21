@@ -66,7 +66,7 @@ function parseOutputText(body: Record<string, unknown>): string | null {
   return parts.length > 0 ? parts.join("\n\n") : null;
 }
 
-function parseLines(text: string): ParsedOutput {
+export function parseLines(text: string): ParsedOutput {
   const rows: ResponseRow[] = [];
   const agg: AggregatedUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 

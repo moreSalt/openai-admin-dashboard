@@ -23,7 +23,10 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  CalendarDays,
+  Plus,
 } from "lucide-react";
+import { CreateBatchModal } from "@/components/create-batch-modal";
 import { RUNNING_BATCH_STATUSES as RUNNING, RESTARTABLE_BATCH_STATUSES as RESTARTABLE } from "@/lib/openai";
 import { statusTone } from "@/lib/batch-utils";
 import { db } from "@/lib/db/client";
@@ -73,10 +76,13 @@ export function BatchesClient() {
   };
 
   const [query, setQuery] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [cancelling, setCancelling] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<
     "all" | "selected" | null
   >(null);
@@ -268,20 +274,23 @@ export function BatchesClient() {
     return { counts, running };
   }, [allBatches]);
 
-  // search across all batches, then paginate
+  // search + date filter across all batches, then paginate
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return allBatches;
-    return allBatches.filter(
-      (b) =>
+    const fromTs = dateFrom ? new Date(dateFrom + "T00:00:00").getTime() / 1000 : null;
+    const toTs = dateTo ? new Date(dateTo + "T23:59:59").getTime() / 1000 : null;
+    return allBatches.filter((b) => {
+      if (fromTs !== null && b.created_at < fromTs) return false;
+      if (toTs !== null && b.created_at > toTs) return false;
+      if (!q) return true;
+      return (
         b.id.toLowerCase().includes(q) ||
         b.status.toLowerCase().includes(q) ||
         b.endpoint.toLowerCase().includes(q) ||
-        Object.values(b.metadata ?? {}).some((v) =>
-          v.toLowerCase().includes(q),
-        ),
-    );
-  }, [allBatches, query]);
+        Object.values(b.metadata ?? {}).some((v) => v.toLowerCase().includes(q))
+      );
+    });
+  }, [allBatches, query, dateFrom, dateTo]);
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
@@ -316,8 +325,8 @@ export function BatchesClient() {
   const safePage = Math.min(page, totalPages - 1);
   const pageRows = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
-  // reset page when query changes
-  useEffect(() => { setPage(0); }, [query]);
+  // reset page when filters change
+  useEffect(() => { setPage(0); }, [query, dateFrom, dateTo]);
 
   const cancellableSelected = useMemo(
     () =>
@@ -464,16 +473,20 @@ export function BatchesClient() {
             <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
+          <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" />
+            New batch
+          </Button>
         </div>
       </div>
 
-      {/* search */}
-      <div className="flex items-center gap-3 mb-4">
-        <div className="relative flex-1 sm:max-w-lg">
+      {/* search + date filter */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="relative flex-1 min-w-[200px] sm:max-w-lg">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[var(--fg-muted)] pointer-events-none" />
           <input
             type="text"
-            placeholder="Search all batches by ID, status, endpoint, metadata…"
+            placeholder="Search by ID, status, endpoint, metadata…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="h-9 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] pl-8 pr-8 text-sm text-[var(--fg)] placeholder:text-[var(--fg-muted)] outline-none focus:border-[var(--border-stronger)] transition-colors"
@@ -487,7 +500,35 @@ export function BatchesClient() {
             </button>
           )}
         </div>
-        {query && (
+        <div className="flex items-center gap-2">
+          <CalendarDays className="size-3.5 text-[var(--fg-muted)] shrink-0" />
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            title="From date"
+            className="h-9 rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2 text-sm text-[var(--fg)] outline-none focus:border-[var(--border-stronger)] transition-colors [color-scheme:dark] w-[136px]"
+          />
+          <span className="text-xs text-[var(--fg-muted)]">–</span>
+          <input
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => setDateTo(e.target.value)}
+            title="To date"
+            className="h-9 rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2 text-sm text-[var(--fg)] outline-none focus:border-[var(--border-stronger)] transition-colors [color-scheme:dark] w-[136px]"
+          />
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              className="text-[var(--fg-muted)] hover:text-[var(--fg)] transition-colors"
+              title="Clear date filter"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
+        {(query || dateFrom || dateTo) && (
           <span className="text-xs text-[var(--fg-muted)]">
             {filtered.length} result{filtered.length !== 1 ? "s" : ""}
           </span>
@@ -761,6 +802,25 @@ export function BatchesClient() {
         <div className="fixed bottom-6 right-6 z-40 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-4 py-3 text-sm">
           {toast}
         </div>
+      )}
+
+      {createOpen && (
+        <CreateBatchModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={(newId) => {
+            setCreateOpen(false);
+            showToast(
+              <span>
+                Batch created.{" "}
+                <button onClick={() => setModalId(newId)} className="underline text-[var(--brand)]">
+                  {newId}
+                </button>
+              </span>,
+            );
+            setModalId(newId);
+            load(true);
+          }}
+        />
       )}
 
       {/* batch detail modal */}

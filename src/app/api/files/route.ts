@@ -9,8 +9,9 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get("limit") ?? "100", 10), 10000);
     const after = searchParams.get("after") ?? undefined;
 
+    const purpose = searchParams.get("purpose") ?? undefined;
     const client = openai();
-    const page = await client.files.list({ limit, after });
+    const page = await client.files.list({ limit, after, purpose });
 
     const files = page.data;
     const has_more = page.hasNextPage() && files.length > 0;

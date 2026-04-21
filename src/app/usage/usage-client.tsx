@@ -1,7 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { Button } from "@/components/ui/button";
+import {
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
 import {
   RefreshCw,
   AlertCircle,
@@ -304,6 +313,13 @@ export function UsageClient() {
         </div>
       )}
 
+      {/* chart */}
+      {!error && rows && rows.length > 0 && (
+        <div className="mb-5">
+          <UsageChart rows={rows} type={type} bucketWidth={effectiveWidth} />
+        </div>
+      )}
+
       {/* table */}
       {!error && (
         <div className="rounded-lg border border-[var(--border)] overflow-hidden">
@@ -374,6 +390,107 @@ export function UsageClient() {
         </div>
       )}
     </div>
+  );
+}
+
+const completionsConfig = {
+  input_tokens: { label: "Input tokens", color: "#60a5fa" },
+  output_tokens: { label: "Output tokens", color: "#34d399" },
+} satisfies ChartConfig;
+
+const costsConfig = {
+  cost_usd: { label: "Cost", color: "#10a37f" },
+} satisfies ChartConfig;
+
+function UsageChart({
+  rows,
+  type,
+  bucketWidth,
+}: {
+  rows: Row[];
+  type: UsageType;
+  bucketWidth: "1d" | "1h";
+}) {
+  const isCosts = type === "costs";
+  const config = isCosts ? costsConfig : completionsConfig;
+
+  const data = useMemo(
+    () => rows.map((r) => ({ ...r, label: formatBucket(r.start_time, bucketWidth) })),
+    [rows, bucketWidth],
+  );
+
+  const formatYAxis = (v: number) => {
+    if (isCosts) {
+      if (v === 0) return "$0";
+      if (v < 0.01) return `$${v.toFixed(4)}`;
+      return `$${v.toFixed(2)}`;
+    }
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}k`;
+    return String(v);
+  };
+
+  return (
+    <ChartContainer config={config} className="h-[220px] w-full">
+      <BarChart data={data} accessibilityLayer margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
+        <CartesianGrid vertical={false} />
+        <XAxis
+          dataKey="label"
+          tickLine={false}
+          axisLine={false}
+          tickMargin={8}
+          interval="preserveStartEnd"
+          tick={{ fontSize: 11 }}
+        />
+        <YAxis
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={formatYAxis}
+          tick={{ fontSize: 11 }}
+          width={56}
+        />
+        <ChartTooltip
+          content={
+            <ChartTooltipContent
+              formatter={(value, name) => (
+                <>
+                  <div
+                    className="size-2 shrink-0 rounded-sm"
+                    style={{
+                      background:
+                        name === "cost_usd"
+                          ? "var(--color-cost_usd)"
+                          : name === "input_tokens"
+                            ? "var(--color-input_tokens)"
+                            : "var(--color-output_tokens)",
+                    }}
+                  />
+                  <div className="flex flex-1 items-center justify-between gap-4 leading-none">
+                    <span className="text-muted-foreground">
+                      {name === "cost_usd" ? "Cost" : name === "input_tokens" ? "Input" : "Output"}
+                    </span>
+                    <span className="font-mono font-medium tabular-nums">
+                      {name === "cost_usd"
+                        ? `$${Number(value).toFixed(4)}`
+                        : Number(value).toLocaleString()}
+                    </span>
+                  </div>
+                </>
+              )}
+            />
+          }
+        />
+        {isCosts ? (
+          <Bar dataKey="cost_usd" fill="var(--color-cost_usd)" radius={[4, 4, 0, 0]} />
+        ) : (
+          <>
+            <Bar dataKey="input_tokens" fill="var(--color-input_tokens)" stackId="stack" radius={[0, 0, 0, 0]} />
+            <Bar dataKey="output_tokens" fill="var(--color-output_tokens)" stackId="stack" radius={[4, 4, 0, 0]} />
+          </>
+        )}
+        <ChartLegend content={<ChartLegendContent />} />
+      </BarChart>
+    </ChartContainer>
   );
 }
 
